@@ -23,6 +23,34 @@ A converted measure is "correct" only if its executed result matches the Power B
 6. Same-day timestamps → `Equal` at `granularity=day`; `Mismatch(DateBoundary)` at `granularity=second`
 7. Reflexivity: `compare(x, x, default)` is `Equal` for all `ResultValue`s
 
+## Install
+
+Add to `Cargo.toml` (once published to crates.io, or via git path):
+
+```toml
+[dependencies]
+pbicorr-dax-result-comparator = "0.1"
+```
+
+Or, from the Git repo directly:
+
+```toml
+[dependencies]
+pbicorr-dax-result-comparator = { git = "https://github.com/joeyen-atscale/pbicorr-dax-result-comparator" }
+```
+
+Quick example:
+
+```rust
+use pbicorr_dax_result_comparator::{compare, ResultValue, TolerancePolicy, Verdict, MismatchReason};
+
+let policy = TolerancePolicy::default();
+assert!(matches!(
+    compare(&ResultValue::Blank, &ResultValue::Number(0.0), &policy),
+    Verdict::Mismatch { reason: MismatchReason::BlankVsZero }
+));
+```
+
 ## License
 
 MIT OR Apache-2.0
