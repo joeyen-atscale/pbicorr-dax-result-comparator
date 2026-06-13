@@ -1,5 +1,7 @@
 # pbicorr-dax-result-comparator
 
+> Part of the **[mqo-mcp](https://github.com/joeyen-atscale/mqo-mcp)** fleet — the AtScale MQO/MCP engine for AI analytics.
+
 DAX-semantic result comparator: given two `ResultValue`s (actual vs expected) and a `TolerancePolicy`, returns `Equal`, `WithinTolerance`, or `Mismatch` with a typed `MismatchReason`.
 
 ## Purpose
