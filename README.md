@@ -1,57 +1,82 @@
 # pbicorr-dax-result-comparator
 
-> Part of the **[mqo-mcp](https://github.com/joeyen-atscale/mqo-mcp)** fleet — the AtScale MQO/MCP engine for AI analytics.
+A verdict engine that decides whether a converted measure's result matches its Power BI reference under DAX semantics — not under float equality. Given two `ResultValue`s and a `TolerancePolicy`, `compare` returns `Equal`, `WithinTolerance`, or `Mismatch` with a typed reason.
 
-DAX-semantic result comparator: given two `ResultValue`s (actual vs expected) and a `TolerancePolicy`, returns `Equal`, `WithinTolerance`, or `Mismatch` with a typed `MismatchReason`.
+## Why it exists
 
-## Purpose
+"Correct" is the hard word in a measure-conversion harness. A converted DAX measure is correct only when its executed result matches the Power BI reference, and DAX disagrees with `==` on what "matches" means. `BLANK()` is a distinct value from `0`. A decimal measure agrees at its declared scale and nowhere finer. Two timestamps on the same calendar day are the same day. A table result has no inherent row order unless the query imposed one. Float equality gets every one of these wrong — too strict where DAX is forgiving, too loose where DAX is exact.
 
-A converted measure is "correct" only if its executed result matches the Power BI reference under DAX semantics — and DAX semantics are not naive float equality. `BLANK()` is not `0`, a decimal measure rounds at a declared scale, dates compare at a boundary, a table result is order-insensitive. This crate is the shared verdict engine used by the round-trip harness and LLM-tail eval.
+So the comparison itself is the thing worth getting right and worth sharing. This crate holds that one decision, with the DAX rules encoded once, so the round-trip harness and the LLM-tail eval both judge correctness the same way.
 
-## Key API
+## What it does
 
-- `compare(actual, expected, policy) -> Verdict`
-- `Verdict`: `Equal` | `WithinTolerance { detail }` | `Mismatch { reason }`
-- `MismatchReason`: `BlankVsZero`, `BlankVsValue`, `NumericBeyondTolerance`, `ScaleDiffers`, `TypeDiffers`, `DateBoundary`, `RowCountDiffers`, `RowSetDiffers`, `CellMismatch`, `TextDiffers`, `BooleanDiffers`, `RowOrderDiffers`
-- `TolerancePolicy`: abs/rel epsilon, ULP budget, `treat_blank_as_zero`, decimal scale, date granularity, order sensitivity
+`compare(actual, expected, policy) -> Verdict` is total: every input pair yields a verdict, and the function never panics.
 
-## Acceptance Criteria
+```rust
+use pbicorr_dax_result_comparator::{compare, MismatchReason, ResultValue, TolerancePolicy, Verdict};
 
-1. `compare(BLANK, Number(0), default)` → `Mismatch(BlankVsZero)`; with `treat_blank_as_zero=true` → `Equal`
-2. Numbers within epsilon/ULP → `WithinTolerance`; beyond → `Mismatch(NumericBeyondTolerance)` with values
-3. Scalar vs Table → `Mismatch(TypeDiffers)`, never panic
-4. Tables with identical rows in different order → `Equal` (default); `Mismatch` when `order_sensitive=true`
-5. Missing row → `RowCountDiffers`/`RowSetDiffers` naming the key; wrong cell → `CellMismatch` with row + column
-6. Same-day timestamps → `Equal` at `granularity=day`; `Mismatch(DateBoundary)` at `granularity=second`
-7. Reflexivity: `compare(x, x, default)` is `Equal` for all `ResultValue`s
+let policy = TolerancePolicy::default();
+
+// BLANK() is not 0 under DAX — default policy says so.
+let v = compare(&ResultValue::Blank, &ResultValue::Number(0.0), &policy);
+assert!(matches!(v, Verdict::Mismatch { reason: MismatchReason::BlankVsZero }));
+```
+
+The verdict carries its evidence. A `Mismatch` names exactly what diverged:
+
+| Reason | When |
+| --- | --- |
+| `BlankVsZero` | one side is `BLANK`, the other is `0`, and `treat_blank_as_zero` is off |
+| `BlankVsValue` | one side is `BLANK`, the other a non-zero value |
+| `NumericBeyondTolerance` | two numbers differ past every tolerance budget — carries `actual`, `expected`, `allowed_abs` |
+| `ScaleDiffers` | numbers disagree at the declared decimal scale |
+| `TypeDiffers` | mismatched value kinds, e.g. scalar vs table |
+| `DateBoundary` | dates differ after truncation to the policy's granularity |
+| `RowCountDiffers` / `RowSetDiffers` | tables differ in row count, or in which row keys are present |
+| `CellMismatch` | a shared row disagrees in one cell — carries the row key and column |
+| `TextDiffers` / `BooleanDiffers` | scalar text or boolean values disagree |
+| `RowOrderDiffers` | rows are in a different order under an order-sensitive policy |
+
+A `WithinTolerance` carries a `detail` string describing how much of the tolerance budget the difference consumed.
+
+## The tolerance policy
+
+`TolerancePolicy` is where the DAX rules become knobs. The defaults are deliberately tight; loosen only what a given measure's semantics ask you to.
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `abs_epsilon` | `1e-9` | absolute float tolerance |
+| `rel_epsilon` | `1e-9` | relative float tolerance |
+| `ulp_budget` | `4` | numbers within this many ULPs count as within tolerance |
+| `treat_blank_as_zero` | `false` | when true, `BLANK` compares equal to `0` |
+| `decimal_scale` | `None` | round to N decimals before comparing (declared-scale measures) |
+| `date_granularity` | `Day` | compare dates at `Day` or `Second` |
+| `order_sensitive` | `false` | when true, table rows must appear in the same order |
+| `max_cell_mismatches` | `10` | cap on reported cell mismatches per table comparison |
+
+`ResultValue` is the union of what a DAX expression can return: `Blank`, `Number(f64)`, `Text`, `Boolean`, `Date(i64)` (Unix epoch seconds, UTC), and `Table`. A `TableResult` keys its rows by their grain-column identity, so row-set comparison is order-insensitive by default and the verdict can name a row precisely.
 
 ## Install
 
-Add to `Cargo.toml` (once published to crates.io, or via git path):
-
-```toml
-[dependencies]
-pbicorr-dax-result-comparator = "0.1"
-```
-
-Or, from the Git repo directly:
+The crate is `publish = false`, so depend on it by git, not from crates.io:
 
 ```toml
 [dependencies]
 pbicorr-dax-result-comparator = { git = "https://github.com/joeyen-atscale/pbicorr-dax-result-comparator" }
 ```
 
-Quick example:
+Build and run the tests from a clone:
 
-```rust
-use pbicorr_dax_result_comparator::{compare, ResultValue, TolerancePolicy, Verdict, MismatchReason};
-
-let policy = TolerancePolicy::default();
-assert!(matches!(
-    compare(&ResultValue::Blank, &ResultValue::Number(0.0), &policy),
-    Verdict::Mismatch { reason: MismatchReason::BlankVsZero }
-));
+```sh
+cargo build
+cargo test
 ```
+
+The suite is the specification: six acceptance files, one per behavior the harness depends on (BLANK-vs-zero, numeric tolerance, type differs, table order, row/cell mismatch, date granularity), plus property tests asserting totality and reflexivity — `compare(x, x, default)` is `Equal` for every value.
+
+## Where it fits
+
+Part of the [mqo-mcp](https://github.com/joeyen-atscale/mqo-mcp) fleet — the AtScale MQO/MCP engine for AI analytics. This crate is the shared correctness oracle: the round-trip conversion harness and the LLM-tail eval both call `compare` so a measure is judged correct by the same DAX rules everywhere.
 
 ## License
 
